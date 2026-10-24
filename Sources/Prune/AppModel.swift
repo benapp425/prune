@@ -363,6 +363,23 @@ final class AppModel {
         return groups.values.filter { copies in copies.count > 1 && copies.allSatisfy { trayCovering($0.path) != nil } }
     }
 
+    /// A selected duplicate whose unselected copies are all gone or changed since they were compared,
+    /// so moving the selection could leave no copy at all.
+    private func duplicateLosingItsLastCopy() -> CleanupItem? {
+        guard let d = duplicates else { return nil }
+        func unchanged(_ copy: CleanupItem) -> Bool {
+            var st = stat()
+            guard lstat(copy.path, &st) == 0, st.st_mode & S_IFMT == S_IFREG, let date = copy.date else { return false }
+            return Int(st.st_mtimespec.tv_sec) == Int(date.timeIntervalSince1970)
+        }
+        for copies in Dictionary(grouping: d.items.filter { $0.group != nil }, by: { $0.group! }).values {
+            let selected = copies.filter { trayCovering($0.path) != nil }
+            guard let first = selected.first else { continue }
+            if !copies.contains(where: { trayCovering($0.path) == nil && unchanged($0) }) { return first }
+        }
+        return nil
+    }
+
     /// Inserts an item, then takes it back out if that leaves some duplicated file with no copy outside the
     /// selection. Returns false when it was refused.
     private func insertKeepingOneCopy(_ entry: TrayItem) -> Bool {
@@ -463,6 +480,13 @@ final class AppModel {
             NSSound.beep()
             show(Toast(title: "At Least One Copy Must Remain",
                        detail: "Every copy of “\(group[0].title)” is selected. Deselect one to keep it.", isError: true))
+            return
+        }
+        if let copy = duplicateLosingItsLastCopy() {
+            confirmingTrash = false
+            NSSound.beep()
+            show(Toast(title: "At Least One Copy Must Remain",
+                       detail: "The other copies of “\(copy.title)” changed after they were compared. Scan again.", isError: true))
             return
         }
         let requests = tray.map { TrashRequest(path: $0.path, bytes: $0.bytes, isDirectory: $0.isDirectory) }

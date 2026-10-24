@@ -119,6 +119,44 @@ public final class FileTree: @unchecked Sendable {
         }
     }
 
+    /// Whether a tree read back from disk is safe to use: every index in range, parents ahead of their children,
+    /// plain names, and sizes that can't overflow when added up.
+    func isWellFormed() -> Bool {
+        let n = names.count
+        guard n > 0, RemovalGuard.isPlain(rootPath), parent.first == -1,
+              [parent.count, childStart.count, childCount.count, flagBits.count, ownAlloc.count, ownPrivate.count,
+               ownCloud.count, ownFiles.count, ownNewest.count].allSatisfy({ $0 == n }) else { return false }
+        func plain(_ name: String) -> Bool { !name.isEmpty && name != "." && name != ".." && !name.contains("/") }
+        for i in 1..<n {
+            let p = Int(parent[i])
+            guard p >= 0, p < i, plain(names[i]) else { return false }
+        }
+        for i in 0..<n {
+            let start = Int(childStart[i]), count = Int(childCount[i])
+            guard count >= 0, count == 0 || (start > i && start + count <= n) else { return false }
+            for c in start..<(start + count) where parent[c] != NodeID(i) { return false }
+        }
+        var alloc: Int64 = 0, priv: Int64 = 0, cloud: Int64 = 0
+        func add(_ total: inout Int64, _ value: Int64) -> Bool {
+            guard value >= 0 else { return false }
+            let (sum, overflow) = total.addingReportingOverflow(value)
+            total = sum
+            return !overflow
+        }
+        for i in 0..<n {
+            guard ownFiles[i] >= 0, add(&alloc, ownAlloc[i]), add(&priv, ownPrivate[i]), add(&cloud, ownCloud[i]) else {
+                return false
+            }
+        }
+        let petabyte: Int64 = 1 << 50
+        for f in bigFiles {
+            guard f.dir >= 0, Int(f.dir) < n, f.removedWith >= -1, Int(f.removedWith) < n, plain(f.name),
+                  (0...petabyte).contains(f.logical), (0...petabyte).contains(f.allocated),
+                  (0...petabyte).contains(f.privateSize) else { return false }
+        }
+        return true
+    }
+
     // MARK: Reading
 
     public func name(_ n: NodeID) -> String { names[Int(n)] }

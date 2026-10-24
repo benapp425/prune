@@ -22,46 +22,85 @@ public enum Bytes {
 /// your user account or an app, whatever the user picks.
 public enum RemovalGuard {
     private static var home: String { AppPaths.home }
+    private static let required = "Required by macOS or your user account."
+    private static let cloudRoot = "The top folder of a cloud drive. Select items inside it instead."
 
+    // Compared in lowercase, because the startup disk ignores case: ~/library/keychains is the Keychains folder.
     private static var protectedExact: Set<String> {
-        let h = home
+        let h = home.lowercased()
         let inHome = ["", "/Library", "/Desktop", "/Documents", "/Downloads", "/Movies", "/Music", "/Pictures",
                       "/Public", "/Applications", "/Library/Application Support", "/Library/Caches",
                       "/Library/Containers", "/Library/Group Containers", "/Library/Preferences",
                       "/Library/Mobile Documents", "/Library/CloudStorage", "/Library/Mail", "/Library/Messages",
                       "/Library/Developer", "/Library/Logs", "/Library/Application Support/MobileSync",
                       "/Library/Application Support/MobileSync/Backup", "/.Trash", "/.ssh", "/.config"]
-        return Set(inHome.map { h + $0 }).union(["/", "/Applications", "/Users", "/Users/Shared"])
+        return Set(inHome.map { h + $0.lowercased() }).union(["/", "/applications", "/users", "/users/shared"])
     }
 
     private static var protectedTrees: [String] {
-        let h = home
-        return [h + "/Library/Keychains", h + "/.Trash", h + "/.ssh", h + "/Library/Preferences",
-                h + "/Library/Accounts", h + "/Library/Mail", h + "/Library/Messages"]
+        let h = home.lowercased()
+        return ["/library/keychains", "/.trash", "/.ssh", "/library/preferences", "/library/accounts", "/library/mail",
+                "/library/messages"].map { h + $0 }
     }
 
     /// Why the item can't be removed, or nil if it can.
     public static func refusal(for path: String) -> String? {
-        let h = home
-        if protectedExact.contains(path) { return "Required by macOS or your user account." }
-        for tree in protectedTrees where path == tree || path.hasPrefix(tree + "/") {
-            return "Required by macOS or your user account."
-        }
+        // One spelling per item, so a protected folder can't get through as ~/Documents/ or ~/Library/../Library.
+        guard isPlain(path) else { return "Not a valid location." }
+        let p = path.lowercased()
+        let h = home.lowercased()
+        if protectedExact.contains(p) { return required }
+        for tree in protectedTrees where p == tree || p.hasPrefix(tree + "/") { return required }
         // The roots of iCloud Drive and cloud storage providers: removing one empties that drive everywhere.
-        for cloud in [h + "/Library/Mobile Documents", h + "/Library/CloudStorage"] {
-            let parent = (path as NSString).deletingLastPathComponent
-            if parent == cloud { return "The top folder of a cloud drive. Select items inside it instead." }
-        }
-        let allowed = path.hasPrefix(h + "/") || path.hasPrefix("/Users/Shared/") || path.hasPrefix("/Applications/")
+        // Google Drive keeps each drive a level further down, in GoogleDrive-<account>/My Drive.
+        let parent = (p as NSString).deletingLastPathComponent
+        let cloudStorage = h + "/library/cloudstorage"
+        if parent == h + "/library/mobile documents" || parent == cloudStorage { return cloudRoot }
+        if (parent as NSString).deletingLastPathComponent == cloudStorage,
+           (parent as NSString).lastPathComponent.hasPrefix("googledrive-") { return cloudRoot }
+        let allowed = p.hasPrefix(h + "/") || p.hasPrefix("/users/shared/") || p.hasPrefix("/applications/")
         if !allowed { return "Managed by macOS." }
-        if path.hasPrefix(h + "/Library/Containers/com.apple.") || path.hasPrefix(h + "/Library/Group Containers/group.com.apple.") {
+        if p.hasPrefix(h + "/library/containers/com.apple.") || p.hasPrefix(h + "/library/group containers/group.com.apple.") {
             return "Belongs to an Apple app."
         }
         if insidePackage(path) { return "Part of an app or package. Select the whole item instead." }
-        if path.hasPrefix("/Applications/"), path.hasSuffix(".app") {
+        if p.hasPrefix("/applications/"), p.hasSuffix(".app") {
             if let id = Bundle(path: path)?.bundleIdentifier, id.hasPrefix("com.apple.") { return "Included with macOS." }
         }
         return nil
+    }
+
+    /// An absolute path with no empty, "." or ".." parts and no trailing slash.
+    public static func isPlain(_ path: String) -> Bool {
+        guard path.hasPrefix("/") else { return false }
+        if path == "/" { return true }
+        return !path.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
+            .contains { $0.isEmpty || $0 == "." || $0 == ".." }
+    }
+
+    /// Checks the item on disk right before it moves: it must still be a folder or a file as the scan saw it,
+    /// spelled the way the disk spells it, with no symbolic link in the folders above it to redirect the move.
+    /// Returns why it can't be moved, or nil.
+    public static func changeOnDisk(for path: String, isDirectory: Bool) -> String? {
+        var st = stat()
+        guard lstat(path, &st) == 0 else { return "The item can't be found." }
+        let changed = "Changed since the last scan. Scan again."
+        let parent = (path as NSString).deletingLastPathComponent
+        guard realPath(parent) == parent else { return changed }
+        let type = st.st_mode & S_IFMT
+        if type != S_IFLNK && realPath(path) != path { return changed }
+        if isDirectory && type != S_IFDIR { return changed }
+        if !isDirectory && type == S_IFDIR && !Scanner.packageExtensions.contains((path as NSString).pathExtension.lowercased()) {
+            return changed
+        }
+        return nil
+    }
+
+    /// The path with symbolic links resolved and each name spelled as it is on disk.
+    static func realPath(_ path: String) -> String? {
+        guard let resolved = realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
     }
 
     /// Something worth knowing before removing the item, or nil.
@@ -144,7 +183,8 @@ public enum TimeMachine {
         }
     }
 
-    /// Number of local Time Machine snapshots on the startup disk.
+    /// Number of local Time Machine snapshots on the startup disk. Snapshots macOS takes for updates aren't counted:
+    /// tmutil can't remove them.
     public static func localSnapshotCount() -> Int {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/tmutil")
@@ -155,7 +195,7 @@ public enum TimeMachine {
         do { try p.run() } catch { return 0 }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        return String(decoding: data, as: UTF8.self).split(separator: "\n").filter { $0.contains("com.apple") }.count
+        return String(decoding: data, as: UTF8.self).split(separator: "\n").filter { $0.contains("com.apple.TimeMachine.") }.count
     }
 }
 

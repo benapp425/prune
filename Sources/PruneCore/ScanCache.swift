@@ -38,8 +38,7 @@ public enum ScanCache {
             w.put(UInt8((f.isDataless ? 1 : 0) | (f.removed ? 2 : 0)))
             w.put(f.removedWith)
         }
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try w.data.write(to: url, options: .atomic)
+        try AppPaths.writePrivately(w.data, to: url)
     }
 
     public static func load(from url: URL = defaultURL) -> FileTree? {
@@ -66,7 +65,7 @@ public enum ScanCache {
             tree.names = names
             let bigCount = Int(try r.get(UInt32.self))
             var big: [BigFile] = []
-            big.reserveCapacity(bigCount)
+            big.reserveCapacity(min(bigCount, 1_000_000))
             for _ in 0..<bigCount {
                 let dir = try r.get(NodeID.self)
                 let name = try r.getString()
@@ -80,6 +79,8 @@ public enum ScanCache {
                 big.append(f)
             }
             tree.bigFiles = big
+            // Any program running as you can write this file, so check it before using it.
+            guard tree.isWellFormed() else { return nil }
             tree.computeTotals()
             return tree
         } catch {
@@ -138,14 +139,42 @@ public enum ScanCache {
 }
 
 public enum AppPaths {
-    /// The home folder. PRUNE_HOME stands in for it in the demo used for screenshots.
-    public static let home: String = ProcessInfo.processInfo.environment["PRUNE_HOME"] ?? NSHomeDirectory()
+    /// The home folder of the account running Prune, from the user database. HOME and CFFIXED_USER_HOME
+    /// aren't used: whatever launches Prune can set them.
+    static let accountHome: String = {
+        if let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir { return String(cString: dir) }
+        return NSHomeDirectory()
+    }()
 
-    public static var isDemo: Bool { ProcessInfo.processInfo.environment["PRUNE_DEMO"] == "1" }
+    /// The home folder Prune works in. In builds made for screenshots (PRUNE_HOOKS), PRUNE_HOME stands in for it.
+    public static let home: String = {
+        #if PRUNE_HOOKS
+        if let demo = ProcessInfo.processInfo.environment["PRUNE_HOME"] { return demo }
+        #endif
+        return accountHome
+    }()
+
+    /// The demo with made-up files, used for screenshots. Only builds made with PRUNE_HOOKS have it.
+    public static var isDemo: Bool {
+        #if PRUNE_HOOKS
+        return ProcessInfo.processInfo.environment["PRUNE_DEMO"] == "1"
+        #else
+        return false
+        #endif
+    }
 
     public static var support: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("Prune", isDirectory: true)
+        URL(fileURLWithPath: accountHome + "/Library/Application Support/Prune", isDirectory: true)
+    }
+
+    /// Writes a file only this user account can read: scan results name files macOS keeps private.
+    static func writePrivately(_ data: Data, to url: URL) throws {
+        let dir = url.deletingLastPathComponent().path
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        chmod(dir, 0o700)
+        try data.write(to: url, options: .atomic)
+        chmod(url.path, 0o600)
     }
 
     /// Replaces the home folder with ~ for display.

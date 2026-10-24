@@ -260,3 +260,90 @@ final class Fixture {
     try "Signature: 8a477f597d28d172789f06886806bc55\n".write(toFile: fx.root + "/data/CACHEDIR.TAG", atomically: true, encoding: .utf8)
     #expect(ClutterEngine.hasCacheDirSignature(fx.root + "/data"))
 }
+
+@Test func otherSpellingsOfProtectedFoldersAreRefused() {
+    let h = NSHomeDirectory()
+    for path in [h + "/", h + "/Documents/", h + "//Library/Keychains", h + "/./Library/Keychains",
+                 h + "/Library/Caches/../Keychains", h + "/Downloads/../Documents", h + "/library/keychains",
+                 h + "/DOCUMENTS", "/Users/Shared/../.." + h + "/Documents", "Documents",
+                 h + "/Library/CloudStorage/GoogleDrive-me@example.com/My Drive"] {
+        #expect(RemovalGuard.refusal(for: path) != nil, "\(path)")
+    }
+    #expect(RemovalGuard.refusal(for: h + "/Library/CloudStorage/GoogleDrive-me@example.com/My Drive/old.zip") == nil)
+}
+
+@Test func movingRefusesItemsReachedThroughALinkOrChangedInKind() throws {
+    let fx = try Fixture()
+    try fx.file("real/child/a.bin", bytes: 100)
+    try FileManager.default.createSymbolicLink(atPath: fx.root + "/link", withDestinationPath: fx.root + "/real")
+    for request in [TrashRequest(path: fx.root + "/link/child", bytes: 100, isDirectory: true),
+                    TrashRequest(path: fx.root + "/REAL/child", bytes: 100, isDirectory: true),
+                    TrashRequest(path: fx.root + "/real/child/a.bin", bytes: 100, isDirectory: true),
+                    TrashRequest(path: fx.root + "/real/child", bytes: 100, isDirectory: false)] {
+        let result = TrashService.moveToTrash([request])
+        #expect(result.moved.isEmpty, "\(request.path)")
+        for e in result.moved { try? FileManager.default.removeItem(atPath: e.trashedPath) }
+    }
+    #expect(FileManager.default.fileExists(atPath: fx.root + "/real/child/a.bin"))
+}
+
+@Test func damagedScanCachesAreIgnored() throws {
+    let fx = try Fixture()
+    try fx.file("a/b/c.bin", bytes: 2_000_000)
+    let url = URL(fileURLWithPath: fx.root + "/cache.bin")
+    func reloads(_ damage: (FileTree) -> Void) -> Bool {
+        let tree = fx.scan()
+        damage(tree)
+        try? ScanCache.save(tree, to: url)
+        return ScanCache.load(from: url) != nil
+    }
+    #expect(reloads { _ in })
+    #expect(!reloads { $0.parent[1] = 5_000 })
+    #expect(!reloads { $0.parent[1] = 1 })
+    #expect(!reloads { $0.childCount[0] = .max })
+    #expect(!reloads { $0.names[1] = "../.." })
+    #expect(!reloads { $0.ownAlloc[1] = -1 })
+    #expect(!reloads { $0.ownAlloc[0] = .max; $0.ownAlloc[1] = .max })
+    #expect(!reloads { $0.bigFiles[0].dir = 9_999 })
+    #expect(!reloads { $0.rootPath += "/../x" })
+}
+
+@Test func putBackOnlyMovesItemsOutOfTheTrashToPlacesPruneCouldUse() throws {
+    let fx = try Fixture()
+    let file = try fx.file("keep/notes.txt", bytes: 10)
+    var st = stat()
+    lstat(file, &st)
+    // An entry another program wrote into history.json, naming a file that isn't in the Trash.
+    var forged = HistoryEntry(originalPath: fx.root + "/copied.txt", trashedPath: file, bytes: 10, isDirectory: false, date: Date())
+    forged.device = st.st_dev
+    forged.inode = UInt64(st.st_ino)
+    #expect(forged.stillInTrash)
+    #expect(throws: (any Error).self) { try TrashService.restore(forged) }
+    #expect(FileManager.default.fileExists(atPath: file))
+
+    let moved = try #require(TrashService.moveToTrash([TrashRequest(path: fx.root + "/keep", bytes: 10, isDirectory: true)]).moved.first)
+    defer { try? FileManager.default.removeItem(atPath: moved.trashedPath) }
+    var elsewhere = moved
+    elsewhere.originalPath = "/private/tmp/prune-test-" + UUID().uuidString
+    defer { try? FileManager.default.removeItem(atPath: elsewhere.originalPath) }
+    #expect(throws: (any Error).self) { try TrashService.restore(elsewhere) }
+    try TrashService.restore(moved)
+    #expect(FileManager.default.fileExists(atPath: file))
+}
+
+@Test func aPipeNamedCacheDirTagIsNotRead() throws {
+    let fx = try Fixture()
+    try FileManager.default.createDirectory(atPath: fx.root + "/p", withIntermediateDirectories: true)
+    #expect(mkfifo(fx.root + "/p/CACHEDIR.TAG", 0o600) == 0)
+    #expect(!ClutterEngine.hasCacheDirSignature(fx.root + "/p"))
+}
+
+@Test func savedScansAreReadableOnlyByTheirOwner() throws {
+    let fx = try Fixture()
+    let dir = fx.root + "/support"
+    try ScanCache.save(fx.scan(), to: URL(fileURLWithPath: dir + "/last-scan.bin"))
+    let dirMode = try FileManager.default.attributesOfItem(atPath: dir)[.posixPermissions] as? Int
+    let fileMode = try FileManager.default.attributesOfItem(atPath: dir + "/last-scan.bin")[.posixPermissions] as? Int
+    #expect(dirMode == 0o700)
+    #expect(fileMode == 0o600)
+}

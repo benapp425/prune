@@ -17,7 +17,7 @@ A few things make the totals line up with what's really on disk:
 
 A scan keeps every folder and every file of 1 MB or more. Smaller files are summed into their folder, which keeps memory use low. The File Browser lists a folder's files live when you open it, so it shows everything.
 
-The last scan is saved in `~/Library/Application Support/Prune/last-scan.bin`, so the app opens with results. Click Scan to refresh.
+The last scan is saved in `~/Library/Application Support/Prune/last-scan.bin`, readable only by your user account, so the app opens with results. Prune checks the file before using it and ignores it if it's damaged. Click Scan to refresh.
 
 ## Free space
 
@@ -46,7 +46,9 @@ Duplicates and Large Files only look in your own folders, not in Library, hidden
 
 ## Removing
 
-Selected items move to the Trash with `FileManager.trashItem`, the same way Finder does it. History records where each item came from, and **Put Back** moves it there again as long as it's still in the Trash. Undo, right after a move, does the same for the whole batch.
+Selected items move to the Trash with `FileManager.trashItem`, the same way Finder does it. Right before each move, Prune checks that the item is still where the scan found it: the same kind of item, spelled the same way, with no symbolic link in the folders above it. Anything that changed is skipped until the next scan.
+
+History records where each item came from, and **Put Back** moves it there again as long as it's still in the Trash. Put Back only moves items out of the Trash, never replaces anything, and only goes to places Prune could have moved them from. Undo, right after a move, does the same for the whole batch.
 
 Prune won't move:
 
@@ -56,7 +58,7 @@ Prune won't move:
 - anything inside an app bundle or other package
 - containers belonging to Apple apps, and apps that ship with macOS
 
-Prune won't let you select every copy of a duplicated file. Items in iCloud Drive or a cloud storage folder show a warning, because removing them removes them from your other devices too.
+Prune won't let you select every copy of a duplicated file, and checks again right before moving that the copy you're keeping hasn't changed. Items in iCloud Drive or a cloud storage folder show a warning, because removing them removes them from your other devices too.
 
 ## Permissions
 

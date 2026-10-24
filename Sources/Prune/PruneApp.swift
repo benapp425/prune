@@ -77,9 +77,11 @@ struct PruneCommands: Commands {
 
 /// Launch hooks for photographing the app from a script: PRUNE_SECTION picks a page,
 /// PRUNE_TRAY=1 fills the tray with recommended items, PRUNE_INFO names a file that receives the window number.
+/// They're compiled only into debug builds and `PRUNE_HOOKS=1 sh scripts/build.sh`, never into the app you install.
 @MainActor
 enum SelfTest {
     static func apply(to model: AppModel) {
+        #if PRUNE_HOOKS
         let env = ProcessInfo.processInfo.environment
         if let section = env["PRUNE_SECTION"] {
             model.showOnboarding = false
@@ -149,5 +151,6 @@ enum SelfTest {
                 }
             }
         }
+        #endif
     }
 }

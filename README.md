@@ -26,11 +26,12 @@
 
 ## Install
 
-1. Download **Prune-1.0.0.dmg** from the [latest release](../../releases/latest).
+1. Download **Prune-1.0.1.dmg** from the [latest release](../../releases/latest).
 2. Open the disk image and drag **Prune** to **Applications**.
 3. Open Prune. Because it isn't notarized by Apple, macOS blocks the first launch:
    open **System Settings > Privacy & Security**, scroll down, and click **Open Anyway** next to the message about Prune. You only do this once.
 4. When Prune asks, allow **Full Disk Access** so it can measure everything, including Mail, Messages and other apps' data.
+   Releases are signed without an Apple certificate, so after each update, turn Full Disk Access on for Prune again.
 
 Requires a Mac with Apple silicon running macOS 15 Sequoia or later.
 
@@ -73,6 +74,10 @@ swift test                   # runs the test suite
 sh scripts/make_dmg.sh       # builds dist/Prune-<version>.dmg
 ```
 
+`sh scripts/make_signing_identity.sh` adds a self-signed certificate named Prune Signing to your login keychain. With it, `build.sh` signs every build the same way, so Full Disk Access stays on from one build to the next. Without it, each build is signed ad hoc and you turn Full Disk Access on again after building.
+
+Debug builds, and `PRUNE_HOOKS=1 sh scripts/build.sh`, include launch hooks for taking screenshots with made-up data. Release builds don't.
+
 `swift run prune-cli scan /` scans from the command line and prints totals, which is handy for comparing with `du`.
 
 Built with the macOS 26 SDK (Command Line Tools 26 or later), Prune picks up Liquid Glass for its floating controls automatically.
@@ -89,7 +94,7 @@ Built with the macOS 26 SDK (Command Line Tools 26 or later), Prune picks up Liq
 
 ## Privacy
 
-Prune never connects to the internet. Scan results stay in `~/Library/Application Support/Prune`.
+Prune never connects to the internet. Scan results and History stay in `~/Library/Application Support/Prune`, readable only by your user account. They include the names of files in folders macOS keeps private, such as Mail and Messages.
 
 ## License
 

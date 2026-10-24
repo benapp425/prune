@@ -4,6 +4,13 @@ import SwiftUI
 struct RootView: View {
     @Environment(AppModel.self) private var model
 
+    private var onboardingPage: Int {
+        #if PRUNE_HOOKS
+        if let page = ProcessInfo.processInfo.environment["PRUNE_PAGE"].flatMap(Int.init) { return page }
+        #endif
+        return UserDefaults.standard.bool(forKey: Prefs.onboarded) ? 1 : 0
+    }
+
     var body: some View {
         @Bindable var model = model
         NavigationSplitView {
@@ -20,8 +27,7 @@ struct RootView: View {
         .toolbar { toolbar }
         .sheet(isPresented: $model.confirmingTrash) { ConfirmTrashSheet() }
         .sheet(isPresented: $model.showOnboarding) {
-            OnboardingView(startAt: ProcessInfo.processInfo.environment["PRUNE_PAGE"].flatMap(Int.init)
-                           ?? (UserDefaults.standard.bool(forKey: Prefs.onboarded) ? 1 : 0))
+            OnboardingView(startAt: onboardingPage)
         }
         .sheet(isPresented: $model.showWhatsNew) { WhatsNewView() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in

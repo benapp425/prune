@@ -53,8 +53,7 @@ public final class HistoryStore: @unchecked Sendable {
     }
 
     private func save() {
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if let data = try? JSONEncoder.iso.encode(entries) { try? data.write(to: url, options: .atomic) }
+        if let data = try? JSONEncoder.iso.encode(entries) { try? AppPaths.writePrivately(data, to: url) }
     }
 }
 
@@ -82,12 +81,12 @@ public enum TrashService {
         var failed: [TrashFailure] = []
         let fm = FileManager.default
         for r in requests {
-            if let refusal = RemovalGuard.refusal(for: r.path) {
-                failed.append(TrashFailure(path: r.path, reason: refusal))
+            if AppPaths.isDemo {
+                failed.append(TrashFailure(path: r.path, reason: "Not available in the demo."))
                 continue
             }
-            guard fm.fileExists(atPath: r.path) || (try? fm.destinationOfSymbolicLink(atPath: r.path)) != nil else {
-                failed.append(TrashFailure(path: r.path, reason: "The item can't be found."))
+            if let reason = RemovalGuard.refusal(for: r.path) ?? RemovalGuard.changeOnDisk(for: r.path, isDirectory: r.isDirectory) {
+                failed.append(TrashFailure(path: r.path, reason: reason))
                 continue
             }
             var result: NSURL?
@@ -111,8 +110,17 @@ public enum TrashService {
     /// Moves an item back from the Trash to where it was.
     public static func restore(_ entry: HistoryEntry) throws {
         let fm = FileManager.default
-        guard entry.stillInTrash else {
+        guard !AppPaths.isDemo else { throw RestoreError("Not available in the demo.") }
+        // History is a file other programs could edit, so only move items out of the Trash,
+        // and only to places Prune could have moved them from.
+        let trash = AppPaths.home + "/.Trash"
+        guard entry.stillInTrash, RemovalGuard.isPlain(entry.trashedPath),
+              (entry.trashedPath as NSString).deletingLastPathComponent == trash,
+              RemovalGuard.realPath(trash) == trash else {
             throw RestoreError("The item is no longer in the Trash.")
+        }
+        guard RemovalGuard.refusal(for: entry.originalPath) == nil else {
+            throw RestoreError("Items can't be put back in that location.")
         }
         guard !fm.fileExists(atPath: entry.originalPath) else {
             throw RestoreError("An item with the same name already exists in that location.")
@@ -122,7 +130,14 @@ public enum TrashService {
         guard fm.fileExists(atPath: parent, isDirectory: &isDir), isDir.boolValue else {
             throw RestoreError("The folder it was in is gone. Put back that folder first, or drag the item out of the Trash in Finder.")
         }
-        try fm.moveItem(atPath: entry.trashedPath, toPath: entry.originalPath)
+        guard RemovalGuard.realPath(parent) == parent else {
+            throw RestoreError("The folder it was in has moved. Drag the item out of the Trash in Finder.")
+        }
+        // RENAME_EXCL fails instead of replacing anything that appeared there in the meantime.
+        guard renamex_np(entry.trashedPath, entry.originalPath, UInt32(RENAME_EXCL)) == 0 else {
+            if errno == EEXIST { throw RestoreError("An item with the same name already exists in that location.") }
+            throw RestoreError(String(cString: strerror(errno)))
+        }
     }
 
     public struct RestoreError: LocalizedError {

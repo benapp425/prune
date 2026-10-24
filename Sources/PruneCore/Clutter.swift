@@ -314,9 +314,14 @@ public final class ClutterEngine {
                 }
             }
         }
-        if let i = folder(h + "/Library/Logs", title: "App Logs", section: "Logs", confidence: .safe, recommended: true,
-                          note: "Diagnostic logs from apps", minimum: 5_000_000) {
-            items.append(i)
+        // ~/Library/Logs itself stays, because apps expect it to be there. Each app's logs are listed instead.
+        if let logs = tree.node(at: h + "/Library/Logs") {
+            for c in tree.liveChildren(logs) {
+                if let i = folder(c, path: tree.path(c), title: catalog.displayName(forFolder: tree.name(c)), section: "Logs",
+                                  confidence: .safe, recommended: true, note: "Diagnostic logs", minimum: 5_000_000) {
+                    items.append(i)
+                }
+            }
         }
         items.sort { $0.bytes > $1.bytes }
         return CategoryResult(category: .caches, items: items, sections: ["App Caches", "Developer Tools", "Web Caches", "Logs"])
@@ -412,10 +417,16 @@ public final class ClutterEngine {
     }
 
     static func hasCacheDirSignature(_ dir: String) -> Bool {
-        guard let h = FileHandle(forReadingAtPath: dir + "/CACHEDIR.TAG") else { return false }
-        defer { try? h.close() }
-        let head = (try? h.read(upToCount: 43)) ?? Data()
-        return head == Data("Signature: 8a477f597d28d172789f06886806bc55".utf8)
+        // Non-blocking and no symbolic links, so a pipe or link named CACHEDIR.TAG can't stall or redirect the read.
+        let fd = open(dir + "/CACHEDIR.TAG", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return false }
+        let signature = Array("Signature: 8a477f597d28d172789f06886806bc55".utf8)
+        var head = [UInt8](repeating: 0, count: signature.count)
+        let n = head.withUnsafeMutableBytes { read(fd, $0.baseAddress, signature.count) }
+        return n == signature.count && head == signature
     }
 
     static let buildFolders: Set<String> = [".next", ".nuxt", ".turbo", ".parcel-cache", ".svelte-kit", ".angular",
