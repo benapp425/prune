@@ -174,3 +174,89 @@ final class Fixture {
     let ours = result.items.filter { $0.path.hasPrefix(base) }
     #expect(Set(ours.map { ($0.path as NSString).lastPathComponent }) == ["one.bin", "two.bin", "three.bin"])
 }
+
+// MARK: Regressions from the safety review
+
+@Test func guardRefusesSensitiveFoldersThemselves() {
+    let h = NSHomeDirectory()
+    #expect(RemovalGuard.refusal(for: h + "/Library/Keychains") != nil)
+    #expect(RemovalGuard.refusal(for: h + "/Library/Accounts") != nil)
+    #expect(RemovalGuard.refusal(for: h + "/Library/Mobile Documents/com~apple~CloudDocs") != nil)
+    #expect(RemovalGuard.refusal(for: h + "/Library/CloudStorage/GoogleDrive-me@example.com") != nil)
+    #expect(RemovalGuard.refusal(for: h + "/Library/Mobile Documents/com~apple~CloudDocs/old.zip") == nil)
+}
+
+@Test func removingAnUncountedFileCantGoNegative() throws {
+    let fx = try Fixture()
+    try fx.file("a/small.txt", bytes: 5_000)
+    let tree = fx.scan()
+    let dir = try #require(tree.node(at: fx.root + "/a"))
+    tree.removeFile(in: dir, named: "new-download.dmg", allocated: 2_000_000_000, privateSize: 2_000_000_000)
+    #expect(tree.size(tree.root) >= 0)
+    #expect(tree.ownSize(dir) >= 0)
+    let url = URL(fileURLWithPath: fx.root + "/../cache-\(UUID().uuidString).bin")
+    defer { try? FileManager.default.removeItem(at: url) }
+    try ScanCache.save(tree, to: url)
+    #expect(try #require(ScanCache.load(from: url)).size(0) >= 0)
+}
+
+@Test func puttingBackAFolderKeepsSeparatelyTrashedFilesGone() throws {
+    let fx = try Fixture()
+    try fx.file("x/big.iso", bytes: 1_500_000)
+    try fx.file("x/other.bin", bytes: 1_200_000)
+    let tree = fx.scan()
+    let x = try #require(tree.node(at: fx.root + "/x"))
+    let iso = try #require(tree.bigFiles.first { $0.name == "big.iso" })
+    tree.removeFile(in: x, named: "big.iso", allocated: iso.allocated, privateSize: iso.privateSize)
+    tree.markRemoved(x)
+    tree.unmarkRemoved(x)
+    #expect(tree.bigFiles.first { $0.name == "big.iso" }?.removed == true)
+    #expect(tree.bigFiles.first { $0.name == "other.bin" }?.removed == false)
+}
+
+@Test func putBackRefusesADifferentItemWithTheSameName() throws {
+    let fx = try Fixture()
+    try fx.file("one/node_modules/a.js", bytes: 100)
+    let first = TrashService.moveToTrash([TrashRequest(path: fx.root + "/one/node_modules", bytes: 100, isDirectory: true)])
+    var entry = try #require(first.moved.first)
+    #expect(entry.stillInTrash)
+    // Stand-in for "the Trash was emptied, then something else landed under the same name".
+    try FileManager.default.removeItem(atPath: entry.trashedPath)
+    try FileManager.default.createDirectory(atPath: entry.trashedPath, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(atPath: entry.trashedPath) }
+    #expect(!entry.stillInTrash)
+    #expect(throws: (any Error).self) { try TrashService.restore(entry) }
+    entry.inode = nil
+    #expect(!entry.stillInTrash)  // entries without an identity are never put back
+}
+
+@Test func putBackRefusesWhenTheFolderItCameFromIsGone() throws {
+    let fx = try Fixture()
+    try fx.file("p/old/assets/logo.png", bytes: 100)
+    let child = TrashService.moveToTrash([TrashRequest(path: fx.root + "/p/old/assets", bytes: 100, isDirectory: true)])
+    let parent = TrashService.moveToTrash([TrashRequest(path: fx.root + "/p/old", bytes: 0, isDirectory: true)])
+    let c = try #require(child.moved.first), p = try #require(parent.moved.first)
+    defer { try? FileManager.default.removeItem(atPath: c.trashedPath); try? FileManager.default.removeItem(atPath: p.trashedPath) }
+    #expect(throws: (any Error).self) { try TrashService.restore(c) }
+    #expect(!FileManager.default.fileExists(atPath: fx.root + "/p/old"))
+    try TrashService.restore(p)
+    try TrashService.restore(c)
+    #expect(FileManager.default.fileExists(atPath: fx.root + "/p/old/assets/logo.png"))
+}
+
+@Test func onlyRealVirtualEnvironmentsAndSignedCacheTagsCount() throws {
+    let fx = try Fixture()
+    try fx.file("proj/.venv/pyvenv.cfg", bytes: 10)
+    try fx.file("proj/.venv/bin/python", bytes: 10)
+    try fx.file("proj/.venv/lib/site.py", bytes: 10)
+    try fx.file("hw3/pyvenv.cfg", bytes: 10)
+    try fx.file("hw3/bin/python", bytes: 10)
+    try fx.file("hw3/lib/x.py", bytes: 10)
+    try fx.file("data/CACHEDIR.TAG", bytes: 10)
+    let tree = fx.scan()
+    #expect(ClutterEngine.isVirtualEnvironment(try #require(tree.node(at: fx.root + "/proj/.venv")), in: tree))
+    #expect(!ClutterEngine.isVirtualEnvironment(try #require(tree.node(at: fx.root + "/hw3")), in: tree))
+    #expect(!ClutterEngine.hasCacheDirSignature(fx.root + "/data"))
+    try "Signature: 8a477f597d28d172789f06886806bc55\n".write(toFile: fx.root + "/data/CACHEDIR.TAG", atomically: true, encoding: .utf8)
+    #expect(ClutterEngine.hasCacheDirSignature(fx.root + "/data"))
+}

@@ -23,6 +23,8 @@ public struct DirEntry {
     public var added: Int64 = 0
     public var isMountPoint = false
 
+    public init() {}
+
     /// Offloaded to iCloud or another file provider: nothing on disk, and reading it would download it.
     public var isDataless: Bool { flags & BulkLister.datalessFlag != 0 }
     public var isHidden: Bool { name.hasPrefix(".") || flags & UInt32(UF_HIDDEN) != 0 }

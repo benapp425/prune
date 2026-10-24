@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>Prune</string>
+    <key>CFBundleDisplayName</key><string>Prune</string>
+    <key>CFBundleIdentifier</key><string>app.prune.Prune</string>
+    <key>CFBundleExecutable</key><string>Prune</string>
+    <key>CFBundleIconFile</key><string>Prune</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+    <key>CFBundleVersion</key><string>__VERSION__</string>
+    <key>LSMinimumSystemVersion</key><string>15.0</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSHumanReadableCopyright</key><string>© 2026 Benjamin Appelbaum</string>
+    <key>NSDesktopFolderUsageDescription</key><string>Prune measures your Desktop to show what takes up space.</string>
+    <key>NSDocumentsFolderUsageDescription</key><string>Prune measures your Documents to show what takes up space.</string>
+    <key>NSDownloadsFolderUsageDescription</key><string>Prune measures your Downloads to find old installers and files you no longer open.</string>
+    <key>NSRemovableVolumesUsageDescription</key><string>Prune measures folders to show what takes up space.</string>
+    <key>NSNetworkVolumesUsageDescription</key><string>Prune measures folders to show what takes up space.</string>
+    <key>NSAppleEventsUsageDescription</key><string>Prune asks Finder to show items you pick.</string>
+</dict>
+</plist>

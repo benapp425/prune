@@ -2,7 +2,7 @@ import Foundation
 
 /// Saves the last scan so the app opens with results instead of an empty window.
 public enum ScanCache {
-    private static let magic: UInt32 = 0x5052_4E33  // "PRN3"
+    private static let magic: UInt32 = 0x5052_4E34  // "PRN4"
 
     public static var defaultURL: URL {
         AppPaths.support.appendingPathComponent("last-scan.bin")
@@ -36,6 +36,7 @@ public enum ScanCache {
             w.put(f.accessed)
             w.put(f.added)
             w.put(UInt8((f.isDataless ? 1 : 0) | (f.removed ? 2 : 0)))
+            w.put(f.removedWith)
         }
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try w.data.write(to: url, options: .atomic)
@@ -75,6 +76,7 @@ public enum ScanCache {
                 let bits = try r.get(UInt8.self)
                 f.isDataless = bits & 1 != 0
                 f.removed = bits & 2 != 0
+                f.removedWith = try r.get(NodeID.self)
                 big.append(f)
             }
             tree.bigFiles = big
@@ -136,7 +138,10 @@ public enum ScanCache {
 }
 
 public enum AppPaths {
-    public static var home: String { NSHomeDirectory() }
+    /// The home folder. PRUNE_HOME stands in for it in the demo used for screenshots.
+    public static let home: String = ProcessInfo.processInfo.environment["PRUNE_HOME"] ?? NSHomeDirectory()
+
+    public static var isDemo: Bool { ProcessInfo.processInfo.environment["PRUNE_DEMO"] == "1" }
 
     public static var support: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

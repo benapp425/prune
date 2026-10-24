@@ -21,7 +21,7 @@ public enum Bytes {
 /// Decides what may be moved to the Trash. The app refuses anything that would break macOS,
 /// your user account or an app, whatever the user picks.
 public enum RemovalGuard {
-    private static var home: String { NSHomeDirectory() }
+    private static var home: String { AppPaths.home }
 
     private static var protectedExact: Set<String> {
         let h = home
@@ -43,16 +43,23 @@ public enum RemovalGuard {
     /// Why the item can't be removed, or nil if it can.
     public static func refusal(for path: String) -> String? {
         let h = home
-        if protectedExact.contains(path) { return "Needed by macOS or your account." }
-        for tree in protectedTrees where path.hasPrefix(tree + "/") { return "Needed by macOS or your account." }
+        if protectedExact.contains(path) { return "Required by macOS or your user account." }
+        for tree in protectedTrees where path == tree || path.hasPrefix(tree + "/") {
+            return "Required by macOS or your user account."
+        }
+        // The roots of iCloud Drive and cloud storage providers: removing one empties that drive everywhere.
+        for cloud in [h + "/Library/Mobile Documents", h + "/Library/CloudStorage"] {
+            let parent = (path as NSString).deletingLastPathComponent
+            if parent == cloud { return "The top folder of a cloud drive. Select items inside it instead." }
+        }
         let allowed = path.hasPrefix(h + "/") || path.hasPrefix("/Users/Shared/") || path.hasPrefix("/Applications/")
-        if !allowed { return "Outside your home folder. macOS manages it." }
+        if !allowed { return "Managed by macOS." }
         if path.hasPrefix(h + "/Library/Containers/com.apple.") || path.hasPrefix(h + "/Library/Group Containers/group.com.apple.") {
             return "Belongs to an Apple app."
         }
-        if insidePackage(path) { return "Part of an app or library. Remove the whole thing instead." }
+        if insidePackage(path) { return "Part of an app or package. Select the whole item instead." }
         if path.hasPrefix("/Applications/"), path.hasSuffix(".app") {
-            if let id = Bundle(path: path)?.bundleIdentifier, id.hasPrefix("com.apple.") { return "Comes with macOS." }
+            if let id = Bundle(path: path)?.bundleIdentifier, id.hasPrefix("com.apple.") { return "Included with macOS." }
         }
         return nil
     }
@@ -60,16 +67,16 @@ public enum RemovalGuard {
     /// Something worth knowing before removing the item, or nil.
     public static func warning(for path: String) -> String? {
         let h = home
-        if path.hasPrefix(h + "/Library/Mobile Documents/") { return "Deletes it from iCloud on all your devices." }
-        if path.hasPrefix(h + "/Library/CloudStorage/") { return "Deletes it from the cloud service too." }
+        if path.hasPrefix(h + "/Library/Mobile Documents/") { return "Also removes it from iCloud on all your devices." }
+        if path.hasPrefix(h + "/Library/CloudStorage/") { return "Also removes it from the cloud service." }
         if path.hasPrefix(h + "/Desktop/") || path.hasPrefix(h + "/Documents/") {
             if (try? URL(fileURLWithPath: path).resourceValues(forKeys: [.isUbiquitousItemKey]))?.isUbiquitousItem == true {
-                return "Deletes it from iCloud on all your devices."
+                return "Also removes it from iCloud on all your devices."
             }
         }
         if path.hasSuffix(".app") { return "Uninstalls the app." }
-        if path.hasSuffix(".photoslibrary") { return "Deletes a Photos library." }
-        if (path as NSString).lastPathComponent == ".git" { return "Deletes the project's version history." }
+        if path.hasSuffix(".photoslibrary") { return "Removes an entire Photos library." }
+        if (path as NSString).lastPathComponent == ".git" { return "Removes the project's version history." }
         return nil
     }
 
@@ -93,7 +100,10 @@ public struct VolumeInfo: Sendable, Equatable {
     /// Free space plus what macOS can purge on its own.
     public var availableWithPurgeable: Int64
 
-    public var used: Int64 { max(0, total - available) }
+    /// Space in use that macOS can't reclaim on its own.
+    public var used: Int64 { max(0, total - availableWithPurgeable) }
+    /// Space macOS frees by itself when needed: local snapshots holding deleted files, iCloud copies, some caches.
+    /// Finder and System Settings count it as available.
     public var purgeable: Int64 { max(0, availableWithPurgeable - available) }
 
     public static func current(path: String = "/") -> VolumeInfo {
@@ -108,6 +118,32 @@ public struct VolumeInfo: Sendable, Equatable {
 }
 
 public enum TimeMachine {
+    public struct ThinError: LocalizedError {
+        public let message: String
+        public var errorDescription: String? { message }
+    }
+
+    /// Removes local Time Machine snapshots on the startup disk so the space they hold is freed now.
+    /// Backups on other disks aren't touched. Asks for an administrator password if macOS requires one.
+    public static func removeLocalSnapshots() throws {
+        let command = "/usr/bin/tmutil thinlocalsnapshots / 999999999999 4"
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/tmutil")
+        p.arguments = ["thinlocalsnapshots", "/", "999999999999", "4"]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try p.run()
+        p.waitUntilExit()
+        if p.terminationStatus == 0 && localSnapshotCount() == 0 { return }
+        var error: NSDictionary?
+        NSAppleScript(source: "do shell script \"\(command)\" with administrator privileges")?.executeAndReturnError(&error)
+        if let error {
+            let code = error[NSAppleScript.errorNumber] as? Int ?? 0
+            if code == -128 { throw ThinError(message: "Cancelled.") }
+            throw ThinError(message: error[NSAppleScript.errorMessage] as? String ?? "Snapshots couldn't be removed.")
+        }
+    }
+
     /// Number of local Time Machine snapshots on the startup disk.
     public static func localSnapshotCount() -> Int {
         let p = Process()
@@ -126,7 +162,7 @@ public enum TimeMachine {
 public enum Permissions {
     /// Whether this app can read folders macOS privacy protection guards (Mail, Messages, Safari).
     public static func hasFullDiskAccess() -> Bool {
-        let h = NSHomeDirectory()
+        let h = AppPaths.home
         let probes = [h + "/Library/Safari", h + "/Library/Mail", h + "/Library/Messages",
                       "/Library/Application Support/com.apple.TCC"]
         var any = false
@@ -150,14 +186,14 @@ public enum Permissions {
 // MARK: What fills the disk
 
 public enum UsageKind: String, CaseIterable, Sendable {
-    case apps = "Apps"
+    case apps = "Applications"
     case documents = "Documents"
-    case media = "Media"
+    case media = "Movies, Music and Pictures"
     case downloads = "Downloads"
-    case appData = "App data"
+    case appData = "App Data"
     case developer = "Developer"
-    case system = "macOS and system"
-    case other = "Other files"
+    case system = "macOS"
+    case other = "Other"
 }
 
 public struct UsageSlice: Sendable, Identifiable {
@@ -168,7 +204,7 @@ public struct UsageSlice: Sendable, Identifiable {
 
 public enum UsageBreakdown {
     public static func compute(_ tree: FileTree) -> [UsageSlice] {
-        let h = NSHomeDirectory()
+        let h = AppPaths.home
         var totals: [UsageKind: Int64] = [:]
         func add(_ path: String, _ kind: UsageKind) -> Int64 {
             guard let n = tree.node(at: path) else { return 0 }

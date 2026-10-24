@@ -47,6 +47,8 @@ public struct BigFile: Sendable {
     public var added: UInt32
     public var isDataless: Bool
     public var removed = false
+    /// The folder whose removal hid this file, or -1 if the file itself was removed.
+    public var removedWith: NodeID = -1
 }
 
 /// The folder tree from a scan. Files are summed into their folder; only files of 1 MB or more are kept
@@ -222,7 +224,10 @@ public final class FileTree: @unchecked Sendable {
                cloud: -totalCloud[Int(n)], files: -totalFiles[Int(n)])
         for i in bigFiles.indices where !bigFiles[i].removed {
             let d = bigFiles[i].dir
-            if d == n || isAncestor(n, of: d) { bigFiles[i].removed = true }
+            if d == n || isAncestor(n, of: d) {
+                bigFiles[i].removed = true
+                bigFiles[i].removedWith = n
+            }
         }
     }
 
@@ -232,18 +237,23 @@ public final class FileTree: @unchecked Sendable {
         flagBits[Int(n)] &= ~NodeFlags.removed.rawValue
         adjust(from: parent[Int(n)], alloc: totalAlloc[Int(n)], priv: totalPrivate[Int(n)],
                cloud: totalCloud[Int(n)], files: totalFiles[Int(n)])
-        for i in bigFiles.indices where bigFiles[i].removed {
-            let d = bigFiles[i].dir
-            if d == n || isAncestor(n, of: d) { bigFiles[i].removed = false }
+        // Only files hidden by this folder's removal; files trashed on their own stay removed.
+        for i in bigFiles.indices where bigFiles[i].removed && bigFiles[i].removedWith == n {
+            bigFiles[i].removed = false
+            bigFiles[i].removedWith = -1
         }
     }
 
-    /// Takes a single file's size off its folder and that folder's ancestors.
+    /// Takes a single file's size off its folder and that folder's ancestors. The amount is capped at what the
+    /// folder's own files add up to, so a file the scan never counted can't push totals below zero.
     public func removeFile(in dir: NodeID, named name: String, allocated: Int64, privateSize: Int64) {
-        adjust(from: dir, alloc: -allocated, priv: -privateSize, cloud: 0, files: -1)
-        ownAlloc[Int(dir)] -= allocated
-        ownPrivate[Int(dir)] -= privateSize
-        ownFiles[Int(dir)] -= 1
+        let i = Int(dir)
+        let alloc = min(max(0, allocated), ownAlloc[i])
+        let priv = min(max(0, privateSize), ownPrivate[i])
+        adjust(from: dir, alloc: -alloc, priv: -priv, cloud: 0, files: ownFiles[i] > 0 ? -1 : 0)
+        ownAlloc[i] -= alloc
+        ownPrivate[i] -= priv
+        ownFiles[i] = max(0, ownFiles[i] - 1)
         if let i = bigFiles.firstIndex(where: { $0.dir == dir && $0.name == name && !$0.removed }) {
             bigFiles[i].removed = true
         }

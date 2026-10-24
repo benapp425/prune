@@ -21,8 +21,13 @@ public final class DuplicateFinder: @unchecked Sendable {
 
     public func cancel() { cancelled.store(true, ordering: .relaxed) }
 
-    public func run(tree: FileTree, exclude: Set<String> = []) -> CategoryResult? {
-        let home = NSHomeDirectory()
+    public struct Candidate: Sendable { let path: String; let file: BigFile }
+
+    public func run(tree: FileTree) -> CategoryResult? { run(candidates: Self.candidates(tree: tree)) }
+
+    /// The files worth comparing. Reads the tree, so call it while nothing changes the tree.
+    public static func candidates(tree: FileTree, minimum: Int64 = 1_000_000) -> [Candidate] {
+        let home = AppPaths.home
         func eligible(_ path: String) -> Bool {
             if path.hasPrefix("/Users/Shared/") { return !RemovalGuard.insidePackage(path) }
             guard path.hasPrefix(home + "/") else { return false }
@@ -36,13 +41,18 @@ public final class DuplicateFinder: @unchecked Sendable {
             return !RemovalGuard.insidePackage(path) && RemovalGuard.refusal(for: path) == nil
         }
 
-        struct Candidate { let path: String; let file: BigFile }
-        var bySize: [Int64: [Candidate]] = [:]
+        var out: [Candidate] = []
         for f in tree.bigFiles where !f.removed && !f.isDataless && f.logical >= minimum && f.allocated > 0 {
             let path = tree.bigFilePath(f)
-            guard eligible(path), !exclude.contains(path) else { continue }
-            bySize[f.logical, default: []].append(Candidate(path: path, file: f))
+            if eligible(path) { out.append(Candidate(path: path, file: f)) }
         }
+        return out
+    }
+
+    /// Hashes candidates that share a size. Doesn't touch the tree. Returns nil if cancelled.
+    public func run(candidates: [Candidate]) -> CategoryResult? {
+        var bySize: [Int64: [Candidate]] = [:]
+        for c in candidates { bySize[c.file.logical, default: []].append(c) }
         let groups = bySize.values.filter { $0.count > 1 }
         let totalWork = max(1, groups.reduce(0) { $0 + $1.count })
         var done = 0
@@ -70,9 +80,12 @@ public final class DuplicateFinder: @unchecked Sendable {
             progress.store(done * 1000 / totalWork, ordering: .relaxed)
         }
 
+        // Files may have been moved to the Trash while hashing ran.
+        found = found.map { $0.filter { FileManager.default.fileExists(atPath: $0.path) } }.filter { $0.count > 1 }
         var items: [CleanupItem] = []
         var reclaimable: Int64 = 0
         var groupID = 0
+        var gains: [Int: Int64] = [:]
         for set in found.sorted(by: { $0[0].file.logical * Int64($0.count) > $1[0].file.logical * Int64($1.count) }) {
             // Copies that are APFS clones share their blocks, so deleting one frees little.
             let sorted = set.sorted { $0.file.modified < $1.file.modified }
@@ -83,11 +96,12 @@ public final class DuplicateFinder: @unchecked Sendable {
             let gain = own + shared - sorted[0].file.allocated
             guard gain >= 100_000 else { continue }
             reclaimable += gain
-            let section = "\(set.count) copies · \(Bytes.format(set[0].file.logical)) each"
+            gains[groupID] = gain
+            let section = "\(set[0].file.name) — \(set.count) copies, \(Bytes.format(set[0].file.logical)) each"
             for c in sorted {
                 items.append(CleanupItem(path: c.path, title: c.file.name, detail: AppPaths.abbreviate((c.path as NSString).deletingLastPathComponent),
                                          bytes: c.file.privateSize, confidence: .safe,
-                                         note: c.file.privateSize < c.file.allocated / 2 ? "Shares storage with another copy." : nil,
+                                         note: c.file.privateSize < c.file.allocated / 2 ? "Shares storage with another copy" : nil,
                                          date: Date(timeIntervalSince1970: TimeInterval(c.file.modified)),
                                          dateLabel: "Modified", isDirectory: false, recommended: false,
                                          section: section, group: groupID))
@@ -95,7 +109,9 @@ public final class DuplicateFinder: @unchecked Sendable {
             groupID += 1
         }
         progress.store(1000, ordering: .relaxed)
-        return CategoryResult(category: .duplicates, items: items, reclaimable: reclaimable)
+        var result = CategoryResult(category: .duplicates, items: items, reclaimable: reclaimable)
+        result.groupGains = gains
+        return result
     }
 
     static func edgeHash(_ path: String, size: Int64) -> Data? {

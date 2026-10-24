@@ -9,9 +9,19 @@ public struct HistoryEntry: Codable, Identifiable, Sendable, Hashable {
     public var isDirectory: Bool
     public var date: Date
     public var restored = false
+    /// File system identity of the item in the Trash, so Put Back never moves a different item with the same name.
+    public var device: Int32? = nil
+    public var inode: UInt64? = nil
 
     public var name: String { (originalPath as NSString).lastPathComponent }
-    public var stillInTrash: Bool { !restored && FileManager.default.fileExists(atPath: trashedPath) }
+
+    /// Still in the Trash, and still the same item that was moved there.
+    public var stillInTrash: Bool {
+        guard !restored, let inode, let device else { return false }
+        var st = stat()
+        guard lstat(trashedPath, &st) == 0 else { return false }
+        return UInt64(st.st_ino) == inode && st.st_dev == device
+    }
 }
 
 public final class HistoryStore: @unchecked Sendable {
@@ -77,14 +87,20 @@ public enum TrashService {
                 continue
             }
             guard fm.fileExists(atPath: r.path) || (try? fm.destinationOfSymbolicLink(atPath: r.path)) != nil else {
-                failed.append(TrashFailure(path: r.path, reason: "It's no longer there."))
+                failed.append(TrashFailure(path: r.path, reason: "The item can't be found."))
                 continue
             }
             var result: NSURL?
             do {
                 try fm.trashItem(at: URL(fileURLWithPath: r.path), resultingItemURL: &result)
-                moved.append(HistoryEntry(originalPath: r.path, trashedPath: result?.path ?? "", bytes: r.bytes,
-                                          isDirectory: r.isDirectory, date: Date()))
+                var entry = HistoryEntry(originalPath: r.path, trashedPath: result?.path ?? "", bytes: r.bytes,
+                                         isDirectory: r.isDirectory, date: Date())
+                var st = stat()
+                if let p = result?.path, lstat(p, &st) == 0 {
+                    entry.device = st.st_dev
+                    entry.inode = UInt64(st.st_ino)
+                }
+                moved.append(entry)
             } catch {
                 failed.append(TrashFailure(path: r.path, reason: friendly(error)))
             }
@@ -95,14 +111,17 @@ public enum TrashService {
     /// Moves an item back from the Trash to where it was.
     public static func restore(_ entry: HistoryEntry) throws {
         let fm = FileManager.default
-        guard fm.fileExists(atPath: entry.trashedPath) else {
-            throw RestoreError("It's no longer in the Trash.")
+        guard entry.stillInTrash else {
+            throw RestoreError("The item is no longer in the Trash.")
         }
         guard !fm.fileExists(atPath: entry.originalPath) else {
-            throw RestoreError("Something else is already at its old location.")
+            throw RestoreError("An item with the same name already exists in that location.")
         }
         let parent = (entry.originalPath as NSString).deletingLastPathComponent
-        try fm.createDirectory(atPath: parent, withIntermediateDirectories: true)
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: parent, isDirectory: &isDir), isDir.boolValue else {
+            throw RestoreError("The folder it was in is gone. Put back that folder first, or drag the item out of the Trash in Finder.")
+        }
         try fm.moveItem(atPath: entry.trashedPath, toPath: entry.originalPath)
     }
 
@@ -116,15 +135,15 @@ public enum TrashService {
         let ns = error as NSError
         let posix = (ns.userInfo[NSUnderlyingErrorKey] as? NSError)?.code ?? 0
         if ns.code == NSFileWriteNoPermissionError || posix == Int(EPERM) || posix == Int(EACCES) {
-            return "macOS didn't allow it. It may belong to another user or the system."
+            return "You don't have permission to move it."
         }
-        if ns.code == NSFileNoSuchFileError { return "It's no longer there." }
+        if ns.code == NSFileNoSuchFileError { return "The item can't be found." }
         return ns.localizedDescription
     }
 
     /// Size of the Trash, or nil when macOS doesn't let Prune look inside it.
     public static func trashSize() -> Int64? {
-        let path = NSHomeDirectory() + "/.Trash"
+        let path = AppPaths.home + "/.Trash"
         var total: Int64 = 0
         var readable = false
         let lister = BulkLister()

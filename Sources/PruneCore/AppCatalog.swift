@@ -15,7 +15,7 @@ public final class AppCatalog: @unchecked Sendable {
 
     public init() {
         let fm = FileManager.default
-        let home = NSHomeDirectory()
+        let home = AppPaths.home
         let roots = ["/Applications", "/Applications/Utilities", home + "/Applications",
                      "/System/Applications", "/System/Applications/Utilities", "/System/Library/CoreServices"]
         var seen = Set<String>()
@@ -103,10 +103,15 @@ public final class AppCatalog: @unchecked Sendable {
         return false
     }
 
-    /// A readable name for a folder named after an app.
+    /// A readable name for a folder named after an app: "com.figma.Desktop" becomes "Figma".
     public func displayName(forFolder name: String) -> String {
-        if Self.looksLikeBundleID(name), let app = app(forBundleID: name) { return app.name }
-        return name
+        guard Self.looksLikeBundleID(name) else { return name }
+        if let app = app(forBundleID: name) { return app.name }
+        let parts = name.split(separator: ".").map(String.init)
+        let generic: Set<String> = ["client", "desktop", "app", "mac", "macos", "osx", "helper", "agent", "main", "electron"]
+        var pick = parts.last ?? name
+        if generic.contains(pick.lowercased()), parts.count >= 2 { pick = parts[1] }
+        return pick.prefix(1).uppercased() + pick.dropFirst()
     }
 
     public func iconPath(forFolder name: String) -> String? {
@@ -114,13 +119,14 @@ public final class AppCatalog: @unchecked Sendable {
         return nil
     }
 
-    /// Bundle IDs and lowercase names of running apps.
-    public static func running() -> (ids: Set<String>, names: Set<String>) {
-        var ids = Set<String>(), names = Set<String>()
+    /// Running apps, by lowercase bundle ID and by lowercase name, each mapped to the app's display name.
+    public static func running() -> (ids: [String: String], names: [String: String]) {
+        var ids: [String: String] = [:], names: [String: String] = [:]
         for app in NSWorkspace.shared.runningApplications {
-            if let id = app.bundleIdentifier { ids.insert(id.lowercased()) }
-            if let n = app.localizedName { names.insert(n.lowercased()) }
-            if let exe = app.executableURL?.lastPathComponent { names.insert(exe.lowercased()) }
+            let display = app.localizedName ?? app.executableURL?.lastPathComponent ?? ""
+            if let id = app.bundleIdentifier { ids[id.lowercased()] = display }
+            if let n = app.localizedName { names[n.lowercased()] = display }
+            if let exe = app.executableURL?.lastPathComponent { names[exe.lowercased()] = display }
         }
         return (ids, names)
     }
